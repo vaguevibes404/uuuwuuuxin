@@ -210,7 +210,7 @@ omitRoleApiAdditions(protectedDocument);
 function omitMomentsControls(node) {
     node.childNodes = (node.childNodes || []).filter(child => {
         const id = child.attrs?.find(a => a.name === 'id')?.value;
-        if (id === 'moments-controls-screen') return false;
+        if (id === 'moments-controls-screen' || id === 'moments-memory-screen') return false;
         const classes = child.attrs?.find(a => a.name === 'class')?.value.split(/\s+/) || [];
         if (classes.includes('kkt-item') && findNodeById(child, 'setting-moments-background-post-enabled')) return false;
         if (id === 'setting-moments-background-post-hint') return false;
@@ -301,8 +301,10 @@ const textualIds = [...logicalHtml.matchAll(/\bid\s*=\s*["']([^"']+)["']/gi)].ma
 const duplicateIds = [...new Set(textualIds.filter((id, index) => textualIds.indexOf(id) !== index))];
 const momentsRedesignIdDelta = 8;
 const momentsChatLinkIds = ['setting-moments-chat-linked', 'setting-moments-chat-link-hint', 'setting-moments-background-post-enabled', 'setting-moments-background-post-hint'];
+const momentsMemoryIds = ['moments-memory-btn', 'moments-memory-screen', 'moments-memory-actor', 'moments-memory-search', 'moments-memory-count', 'moments-memory-select-all', 'moments-memory-list', 'moments-memory-clear-all', 'moments-memory-delete-selected'];
+for (const id of momentsMemoryIds) if (!textualIds.includes(id)) fail(`Missing moments memory ID: ${id}`);
 for (const id of momentsChatLinkIds) if (!textualIds.includes(id)) fail(`Missing moments chat linkage ID: ${id}`);
-if (textualIds.length !== 2636 + novelAiAdditionIds.length + statusStorageAdditionIds.length + momentsRedesignIdDelta + momentsChatLinkIds.length + ttsAdditionIds.length + 35) fail(`Unexpected assembled ID count after authorized additions: ${textualIds.length}`);
+if (textualIds.length !== 2636 + novelAiAdditionIds.length + statusStorageAdditionIds.length + momentsRedesignIdDelta + momentsChatLinkIds.length + momentsMemoryIds.length + ttsAdditionIds.length + 35) fail(`Unexpected assembled ID count after authorized additions: ${textualIds.length}`);
 if (duplicateIds.length) fail(`Duplicate assembled IDs: ${duplicateIds.join(', ')}`);
 
 const requiredIds = [

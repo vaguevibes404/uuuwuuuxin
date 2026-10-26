@@ -5,6 +5,7 @@
     const controls = window.MomentsControls;
     const state = { compose: null, currentPostId: null, profileActorId: null, profilePersonaId: '', resultPostId: '', picker: null, editor: null, commentEdit: null, regeneratingComments: new Set(), deletingComments: new Set(), batch: null, recorder: null, recordStream: null, recordFinishing: false, mediaBusy: false, running: false, confirming: false, initialized: false, deleteArmed: '', friendActorId: '', selectingNotifications: false, selectedNotificationIds: new Set(), notificationDeleteArmed: false, selectedPostIds: new Set(), manageQuery: '', manageAuthor: '', deletingPosts: false, stickerTarget: '', stickerCategory: 'all', stickerQuery: '' };
     const mediaModes = new Set(['off', 'manual', 'auto', 'ai']);
+    const memoryState = { actorId: '', query: '', selected: new Set(), busy: false };
     const promptDefaults = {
         post: '你可以在聊天中自主决定发动态，也可以响应用户要求。发动态指令：[MOMENT:post]。你也可以删除自己发布的动态：[MOMENT:delete:动态ID]；删除后你仍会记得自己发过并删除了什么。',
         story: '你可以自主决定发布 24 小时 Story。指令：[MOMENT:story]。',
@@ -55,6 +56,9 @@
     function persist() { persistQueue = persistQueue.catch(() => false).then(() => saveGlobalSettings(['moments'])); return persistQueue; }
     function charActor(charId) { const character = (db.characters || []).find(c => c.id === charId); return character?.momentsActorId || 'char:' + charId; }
     function findCharacter(actorId) { return (db.characters || []).find(c => c.momentsActorId === actorId || (String(actorId || '').startsWith('char:') && c.id === actorId.slice(5))) || null; }
+    function memoryAllowed(postId, actorId) {
+        return !postId || !findCharacter(actorId)?.momentsSettings?.forgottenPostIds?.includes(postId);
+    }
     function characterSettings(character) {
         if (!character.momentsSettings || typeof character.momentsSettings !== 'object') character.momentsSettings = {};
         const s={...character.momentsSettings};
@@ -207,7 +211,7 @@
     }
     function commentSummary(comment) { return [String(comment?.text || '').trim(), comment?.sticker ? `[表情包：${comment.sticker.name || '表情包'}]` : ''].filter(Boolean).join(' ').slice(0, 180); }
     function recordActivity(type, actorId, post, detail = '', knownTo = [], commentId = '') {
-        const ids = [...new Set([actorId, ...knownTo].filter(value => value && value !== 'user' && person(value)))];
+        const ids = [...new Set([actorId, ...knownTo].filter(value => value && value !== 'user' && person(value) && memoryAllowed(post.id, value)))];
         const authorName = (actorId === 'user' ? userIdentity(post.authorPersonaId || post.userInteractionPersonaId || 'legacy') : person(actorId))?.name || '有人';
         const subject = postSummary(post);
         const actions = { post: '发布了动态', story: '发布了 Story', edit: '编辑了动态', delete: '删除了动态', view: '查看了动态', like: '赞了动态', unlike: '取消了点赞', comment: '评论了动态', reply: '回复了评论', 'edit-comment': '修改了评论', 'delete-comment': '删除了评论' };
@@ -220,10 +224,10 @@
         if (!event) return;
         for (const actorId of event.knownTo || []) {
             const character = findCharacter(actorId);
-            if (!character) continue;
+            if (!character || !memoryAllowed(event.postId, actorId)) continue;
             if (!Array.isArray(character.history)) character.history = [];
             if (character.history.some(message => message.momentsEventId === event.id)) continue;
-            const message = { id: 'msg_' + event.id, role: 'system', content: `[system-display:${event.text}]`, timestamp: event.createdAt, parts: [], isMomentsActivity: true, excludeFromContext: true, momentsEventId: event.id };
+            const message = { id: 'msg_' + event.id, role: 'system', content: `[system-display:${event.text}]`, timestamp: event.createdAt, parts: [], isMomentsActivity: true, excludeFromContext: true, momentsEventId: event.id, momentsPostId: event.postId || '' };
             character.history.push(message);
             try { await saveCharacter(character.id); } catch (error) { console.error('动态旁白保存失败', error); }
             if (typeof currentChatType !== 'undefined' && currentChatType === 'private' && currentChatId === character.id && characterSettings(character).showActivityNarration && typeof addMessageBubble === 'function') addMessageBubble(message, character.id, 'private');
@@ -231,8 +235,9 @@
     }
     function activityContext(actorId) {
         const events = ensure().activityEvents.filter(event => (event.knownTo || []).includes(actorId) && (event.type !== 'nickname' || nicknameSetting(actorId, 'nicknameAwareness') || (event.actorId === actorId && nicknameSetting(actorId, 'selfRename'))) && (!event.commentId || event.type === 'delete-comment' || findPost(event.postId)?.comments?.some(comment => comment.id === event.commentId && !comment.deletedAt)));
-        const recent = events.slice(-8);
-        const deleted = events.filter(event => event.type === 'delete' && event.postAuthorId === actorId && !recent.includes(event)).slice(-30);
+        const remembered = events.filter(event => memoryAllowed(event.postId, actorId));
+        const recent = remembered.slice(-8);
+        const deleted = remembered.filter(event => event.type === 'delete' && event.postAuthorId === actorId && !recent.includes(event)).slice(-30);
         const relevant = [...deleted, ...recent].sort((a, b) => a.createdAt - b.createdAt);
         return relevant.map(event => `- ${event.text}`).join('\n');
     }
@@ -576,6 +581,82 @@
         for (const key of ['characterNicknameAwareness', 'contactNicknameAwareness', 'characterSelfRename', 'contactSelfRename']) el('moments-' + key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase())).checked = ensure().settings[key];
         renderGroups();
         switchScreen('moments-settings-screen');
+    }
+    function memoryRows(actorId = memoryState.actorId) {
+        const rows = new Map();
+        const add = (postId, text, time, event = null) => {
+            if (!postId || !memoryAllowed(postId, actorId)) return;
+            let row = rows.get(postId);
+            if (!row) { row = { postId, text, time: time || 0, events: [] }; rows.set(postId, row); }
+            if (event) row.events.push(event);
+            if (time >= row.time) { row.time = time; row.text = text || row.text; }
+        };
+        const m = ensure();
+        for (const post of m.posts) if (post.authorId === actorId || post.seenBy?.[actorId]) add(post.id, postSummary(post), post.seenBy?.[actorId] || post.createdAt);
+        for (const event of m.activityEvents) if (event.knownTo?.includes(actorId)) add(event.postId, event.text, event.createdAt, event);
+        for (const message of findCharacter(actorId)?.history || []) if (message.isMomentsActivity && message.momentsPostId) add(message.momentsPostId, message.content, message.timestamp);
+        return [...rows.values()].sort((a, b) => b.time - a.time);
+    }
+    function filteredMemoryRows() {
+        const query = memoryState.query.trim().toLocaleLowerCase();
+        return memoryRows().filter(row => !query || [row.text, ...row.events.map(event => event.text)].join(' ').toLocaleLowerCase().includes(query));
+    }
+    function renderMemory() {
+        const characters = db.characters || [];
+        if (!characters.some(c => charActor(c.id) === memoryState.actorId)) memoryState.actorId = characters[0] ? charActor(characters[0].id) : '';
+        el('moments-memory-actor').innerHTML = characters.map(c => `<option value="${esc(charActor(c.id))}">${esc(c.remarkName || c.realName || '未命名角色')}</option>`).join('');
+        el('moments-memory-actor').value = memoryState.actorId;
+        const all = memoryRows(), rows = filteredMemoryRows();
+        const validIds = new Set(all.map(row => row.postId));
+        for (const postId of memoryState.selected) if (!validIds.has(postId)) memoryState.selected.delete(postId);
+        el('moments-memory-count').textContent = `共 ${all.length} 条动态记忆，显示 ${rows.length} 条`;
+        el('moments-memory-list').innerHTML = rows.length ? rows.map(row => {
+            const post = findPost(row.postId), selected = memoryState.selected.has(row.postId);
+            return `<article class="moments-memory-card moments-settings-card"><button type="button" class="moments-manage-row" data-action="toggle-memory" data-post-id="${esc(row.postId)}" aria-pressed="${selected}" ${memoryState.busy ? 'disabled' : ''}><span class="moments-manage-check" aria-hidden="true">${selected ? '✓' : ''}</span><span class="moments-manage-row-main"><strong>${esc(post ? postAuthorName(post) + '的' + (post.kind === 'story' ? ' Story' : '动态') : '已删除的动态 / Story')}</strong><small>${esc(readableTime(row.time))} · ${row.events.length} 条活动记录</small><span>${esc(post ? postSummary(post) : row.text)}</span></span></button>${row.events.length ? `<details><summary>查看记忆记录</summary><ul>${row.events.map(event => `<li>${esc(event.text)}</li>`).join('')}</ul></details>` : '<p class="moments-hint">角色已看过或发布过这条动态。</p>'}<div class="moments-inline-actions"><button type="button" data-action="forget-memory" data-post-id="${esc(row.postId)}" ${memoryState.busy ? 'disabled' : ''}>清除这条记忆</button></div></article>`;
+        }).join('') : `<div class="moments-empty">${!characters.length ? '还没有聊天角色。' : memoryState.query.trim() ? '没有找到匹配的动态记忆。' : '这个角色没有可清除的动态记忆。'}</div>`;
+        el('moments-memory-delete-selected').textContent = `清除选中 (${memoryState.selected.size})`;
+        el('moments-memory-delete-selected').disabled = memoryState.busy || !memoryState.selected.size;
+        el('moments-memory-clear-all').disabled = memoryState.busy || !all.length;
+        el('moments-memory-select-all').disabled = memoryState.busy || !rows.length;
+        el('moments-memory-actor').disabled = memoryState.busy;
+        el('moments-memory-search').disabled = memoryState.busy;
+    }
+    function openMemory() {
+        memoryState.query = ''; memoryState.selected.clear();
+        el('moments-memory-search').value = '';
+        renderMemory(); switchScreen('moments-memory-screen');
+    }
+    async function forgetMemories(postIds) {
+        if (memoryState.busy) return false;
+        const actorId = memoryState.actorId, character = findCharacter(actorId);
+        const available = new Set(memoryRows(actorId).map(row => row.postId));
+        const ids = new Set(postIds.filter(postId => available.has(postId)));
+        if (!character || !ids.size) return false;
+        memoryState.busy = true; renderMemory();
+        try {
+            const choice = await showAppConfirmDialog({ title: '清除动态记忆', message: `确定让${character.remarkName || character.realName || '这个角色'}忘记这 ${ids.size} 条动态？观看、互动、删除记录及隐藏旁白将从该角色的动态上下文中清除，这些动态也不会再自动观看或参与互动。动态和其他角色的记忆会保留。普通聊天、总结和其他记忆中已经提到的内容需另行删除。`, confirmText: '清除记忆', cancelText: '取消', dismissText: '' });
+            if (choice !== 'confirm' || findCharacter(actorId) !== character) return false;
+            character.momentsSettings ||= {};
+            const previous = character.momentsSettings.forgottenPostIds;
+            // Store only post IDs on this character: the shared event remains available to other witnesses.
+            character.momentsSettings.forgottenPostIds = [...new Set([...(previous || []), ...ids])];
+            const eventIds = new Set(ensure().activityEvents.filter(event => ids.has(event.postId)).map(event => event.id));
+            const removed = (character.history || []).map((message, index) => ({ message, index })).filter(({ message }) => message.isMomentsActivity && (ids.has(message.momentsPostId) || eventIds.has(message.momentsEventId)));
+            const removedMessages = new Set(removed.map(entry => entry.message));
+            if (removed.length) character.history = character.history.filter(message => !removedMessages.has(message));
+            let saved = false;
+            try { saved = await saveCharacter(character.id); } catch (error) { console.error('动态记忆清除保存失败', error); }
+            if (!saved) {
+                if (previous === undefined) delete character.momentsSettings.forgottenPostIds;
+                else character.momentsSettings.forgottenPostIds = previous;
+                for (const { message, index } of removed) character.history.splice(index, 0, message);
+                toast('保存失败，动态记忆未清除'); return false;
+            }
+            for (const postId of ids) memoryState.selected.delete(postId);
+            if (typeof currentChatId !== 'undefined' && currentChatId === character.id && typeof renderMessages === 'function') renderMessages();
+            toast(`已清除 ${ids.size} 条动态记忆`);
+            return true;
+        } finally { memoryState.busy = false; renderMemory(); }
     }
     function managedPosts() {
         const query = state.manageQuery.trim().toLocaleLowerCase();
@@ -1113,6 +1194,7 @@
         if (list.length > 300) list.length = 300;
     }
     function addComment(post, authorId, text, replyTo = '', mentions = [], sticker = null, task = null) {
+        if (!memoryAllowed(post.id, authorId)) return null;
         if (!visibleTo(post, authorId) || !person(authorId) || (!String(text || '').trim() && !sticker) || (replyTo && !post.comments?.some(item => item.id === replyTo && !item.deletedAt))) return null;
         if (controls && !controls.commentAllowed(post, authorId, replyTo, task)) return null;
         const cleanText = String(text).trim().slice(0, 1000);
@@ -1284,8 +1366,8 @@
         const own = findCharacter(actorId);
         const contact = ensure().contacts.find(c => c.actorId === actorId && c.kind === 'npc');
         const owner = own || (contact?.ownerCharId ? (db.characters || []).find(c => c.id === contact.ownerCharId) : null);
-        const history = own ? (own.history || []).filter(message => !message.isContextDisabled).slice(-8).map(message => `${message.role === 'user' ? '用户' : '角色'}：${String(message.content || '').slice(0, 180)}`).join('\n') : '';
-        const posts = ensure().posts.filter(post => visibleTo(post, actorId) && (post.authorId === actorId || post.seenBy?.[actorId])).sort((a, b) => b.createdAt - a.createdAt).slice(0, 6).map(post => `${aiName(post.authorId, actorId, profilePersonaForPost(post))}：${postSummary(post)}`).join('\n');
+        const history = own ? (own.history || []).filter(message => !message.isContextDisabled && (!message.isMomentsActivity || memoryAllowed(message.momentsPostId || ensure().activityEvents.find(event => event.id === message.momentsEventId)?.postId, actorId))).slice(-8).map(message => `${message.role === 'user' ? '用户' : '角色'}：${String(message.content || '').slice(0, 180)}`).join('\n') : '';
+        const posts = ensure().posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && (post.authorId === actorId || post.seenBy?.[actorId])).sort((a, b) => b.createdAt - a.createdAt).slice(0, 6).map(post => `${aiName(post.authorId, actorId, profilePersonaForPost(post))}：${postSummary(post)}`).join('\n');
         const ownBooks = (owner?.worldBookIds || []).map(bookId => (db.worldBooks || []).find(book => book.id === bookId)).filter(book => book && !book.disabled);
         const relevantBooks = contact ? boundWorldBooks(contact) : [];
         const books = [...new Map((contact?relevantBooks:ownBooks).map(book => [book.id,book])).values()];
@@ -1436,7 +1518,7 @@
         const ids = new Set();
         for (const actorId of post.audienceIds || []) {
             if (actorId === 'user' || actorId === post.authorId || !person(actorId)) continue;
-            if (actorMayInteract(actorId) && visibleTo(post, actorId)) ids.add(actorId);
+            if (memoryAllowed(post.id, actorId) && actorMayInteract(actorId) && visibleTo(post, actorId)) ids.add(actorId);
         }
         return [...ids];
     }
@@ -1477,7 +1559,7 @@
         const candidateIds = candidatesForPost(post);
         const author = findCharacter(post.authorId);
         if (author && characterSettings(author).interactEnabled || controls && actorMayInteract(post.authorId)) candidateIds.unshift(post.authorId);
-        let candidates = [...new Set(candidateIds)].filter(actorId => actorId !== comment.authorId && (post.authorId === actorId || post.seenBy?.[actorId]) && canSeeInteraction(post, actorId, comment.authorId, comment.authorPersonaId));
+        let candidates = [...new Set(candidateIds)].filter(actorId => memoryAllowed(post.id, actorId) && actorId !== comment.authorId && (post.authorId === actorId || post.seenBy?.[actorId]) && canSeeInteraction(post, actorId, comment.authorId, comment.authorPersonaId));
         if (controls) { task ||= controls.context(comment.authorId === 'user' ? 'userComment' : 'aiComment', candidates, post, comment); candidates = controls.candidates(post, comment, candidates.filter(a => task.actorIds.includes(a)), task.source, task); task.actorIds = candidates; }
         else candidates = candidates.slice(0, 8);
         if (!candidates.length) return;
@@ -1530,7 +1612,7 @@
         const revision = comment.revision || 0;
         const originalText = comment.text;
         const oldReplyIds = oldReplies.map(item => item.id);
-        const actorIds = [...new Set(oldReplies.map(item => item.authorId))].filter(actorId => person(actorId) && visibleTo(post, actorId) && actorMayInteract(actorId) && (post.authorId === actorId || post.seenBy?.[actorId]) && canSeeInteraction(post, actorId, 'user', comment.authorPersonaId));
+        const actorIds = [...new Set(oldReplies.map(item => item.authorId))].filter(actorId => memoryAllowed(post.id, actorId) && person(actorId) && visibleTo(post, actorId) && actorMayInteract(actorId) && (post.authorId === actorId || post.seenBy?.[actorId]) && canSeeInteraction(post, actorId, 'user', comment.authorPersonaId));
         if (actorIds.length !== new Set(oldReplies.map(item => item.authorId)).size) { toast('原回复角色当前无法互动，旧回复已保留'); return; }
         state.regeneratingComments.add(commentId);
         renderDetail(postId);
@@ -1541,6 +1623,7 @@
             const currentReplyIds = (post.comments || []).filter(item => item.replyTo === commentId && item.authorId !== 'user' && !item.deletedAt).map(item => item.id);
             if (findPost(postId) !== post || !post.comments?.includes(comment) || comment.deletedAt || (comment.revision || 0) !== revision || comment.text !== originalText || currentReplyIds.length !== oldReplyIds.length || currentReplyIds.some((replyId, index) => replyId !== oldReplyIds[index])) { toast('评论或回复已变化，本次生成未替换原回复'); return; }
             const replacements = [];
+            if (actorIds.some(actorId => !memoryAllowed(postId, actorId))) return;
             for (const oldReply of oldReplies) {
                 const reply = (Array.isArray(result.replies) ? result.replies : []).find(item => item.replyId === oldReply.id && item.actorId === oldReply.authorId);
                 const sticker = reply?.stickerId ? stickerSnapshot(String(reply.stickerId), oldReply.authorId) : null;
@@ -2058,6 +2141,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
     async function applyActorAction(actorId, action, task = null) {
         const post = findPost(String(action.postId || ''));
         if (!post || !visibleTo(post, actorId) || (post.kind === 'story' && post.expiresAt <= Date.now())) return { ok: false, reason: '无权查看或动态已失效' };
+        if (!memoryAllowed(post.id, actorId)) return { ok: false, reason: '这条动态的记忆已清除' };
         if (controls && (!controls.valid(task) || post.controlsPaused)) return { ok: false, reason: '动态任务已暂停或内容已变化' };
         if (controls && action.type !== 'view' && !controls.settings(actorId, post).actions.interact) return { ok: false, reason: '当前设置未允许点赞评论动作' };
         if (action.type === 'view') {
@@ -2115,7 +2199,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         return { ok: true };
     }
     async function viewPostForActor(postId,actorId,immediate=false,feedback=null,task=null) {
-        const post=findPost(postId);if(!post||!visibleTo(post,actorId)||!person(actorId))return;
+        const post=findPost(postId);if(!post||!memoryAllowed(postId,actorId)||!visibleTo(post,actorId)||!person(actorId))return;
         if(controls)task||=controls.context(immediate?'view':'chatPrep',[actorId],post);
         if(controls&&!controls.allowed(actorId,task.source,post)){viewStatus(postId,actorId,'blocked','未观看：此对象的观看设置已关闭',task);await persist();return;}
         const log=viewStatus(postId,actorId,'running',`${person(actorId).name}正在观看…`,task);
@@ -2167,7 +2251,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         if (!controls && !force && Date.now() - (holder.lastActivityAt || 0) < 60 * 60 * 1000) return false;
         holder.lastActivityAt = Date.now();
         if (character) await saveCharacter(character.id); else await persist();
-        const currentPosts = ensure().posts.filter(post => visibleTo(post, actorId) && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt);
+        const currentPosts = ensure().posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt);
         const browseable = settings.browseEnabled ? currentPosts.filter(post => post.authorId !== actorId && !post.seenBy?.[actorId]).slice(0, 8) : [];
         const interactable = settings.interactEnabled ? currentPosts.filter(post => (post.authorId === actorId || post.seenBy?.[actorId]) && (!controls || controls.commentAllowed(post, actorId))).slice(0, 8) : [];
         const ownPosts = currentPosts.filter(post => post.authorId === actorId).slice(0, 8);
@@ -2261,9 +2345,9 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         const ownName = aware || nicknameSetting(actorId, 'selfRename') ? `你当前动态主页显示为“${aiName(actorId, actorId)}”。` : '';
         const profileContext = [ownName, ownSignature ? `你当前主页的个人签名是“${ownSignature}”。` : '', knownUser?.signature ? `你认识的${aiName('user', actorId, knownUserId)}的主页签名是“${knownUser.signature}”。` : '', aware && knownUser?.nickname ? `你认识的用户当前动态网名是“${knownUser.name}”。` : ''].filter(Boolean).join('\n');
         if (![settings.postEnabled, settings.storyEnabled, settings.browseEnabled, settings.interactEnabled, settings.contactsEnabled, nicknameSetting(actorId, 'selfRename')].some(Boolean)) return activity || profileContext ? '\n<visible_moments>\n' + [profileContext, activity ? '你亲历的动态操作记录：\n' + activity : ''].filter(Boolean).join('\n') + '\n</visible_moments>\n' : '';
-        const reminders = m.notifications.filter(n => n.toId === actorId && m.posts.some(post => post.id === n.postId && visibleTo(post, actorId))).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+        const reminders = m.notifications.filter(n => n.toId === actorId && memoryAllowed(n.postId, actorId) && m.posts.some(post => post.id === n.postId && visibleTo(post, actorId))).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
         const remindedIds = reminders.map(n => n.postId);
-        const posts = m.posts.filter(post => visibleTo(post, actorId) && (post.authorId === actorId || post.seenBy?.[actorId]) && (post.kind === 'post' || post.expiresAt > Date.now())).sort((a, b) => Number(remindedIds.includes(b.id)) - Number(remindedIds.includes(a.id)) || b.createdAt - a.createdAt).slice(0, 5);
+        const posts = m.posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && (post.authorId === actorId || post.seenBy?.[actorId]) && (post.kind === 'post' || post.expiresAt > Date.now())).sort((a, b) => Number(remindedIds.includes(b.id)) - Number(remindedIds.includes(a.id)) || b.createdAt - a.createdAt).slice(0, 5);
         const lines = posts.map(post => {
             const comments = (post.comments || []).filter(c => !c.deletedAt && canSeeInteraction(post, actorId, c.authorId, c.authorPersonaId)).slice(-3).map(c => `[评论ID:${c.id}] ${aiName(c.authorId, actorId, c.authorPersonaId || profilePersonaForPost(post))}：${commentSummary(c).slice(0, 80)}`).join('；');
             const reminder = reminders.find(n => n.postId === post.id);
@@ -2292,7 +2376,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         if (posts.length) capabilities.push(promptRule('seen', { 动态列表: lines.join('\n') }));
         if (activity) capabilities.push('你亲历的动态操作记录（删除的动态已不可查看，但你记得自己的经历）：\n' + activity);
         if (settings.browseEnabled) {
-            const unseen = m.posts.filter(post => visibleTo(post, actorId) && post.authorId !== actorId && !post.seenBy?.[actorId] && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+            const unseen = m.posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && post.authorId !== actorId && !post.seenBy?.[actorId] && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
             if (unseen.length) capabilities.push(promptRule('unseen', { 动态列表: unseen.map(post => `[ID:${post.id}] ${aiName(post.authorId, actorId, profilePersonaForPost(post))}，${post.kind === 'story' ? 'Story' : '动态'}，${readableTime(post.createdAt)}`).join('；') }));
         }
         const activeCapabilities = capabilities.filter(Boolean);
@@ -2306,7 +2390,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         if (settings.browseEnabled) await autonomousActivity(actorId, false, null, controls?.context('chatPrep', [actorId]));
         if (isBackground || !settings.interactEnabled && !settings.browseEnabled) return;
         if (!/(动态|朋友圈|Story|story|点赞|点个赞|评论)/i.test(String(userText))) return;
-        const available = ensure().posts.filter(post => visibleTo(post, actorId) && !post.seenBy?.[actorId] && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+        const available = ensure().posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && !post.seenBy?.[actorId] && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
         if (!available.length) return;
         try {
             const result = await askAI(`你是${aiName(actorId, actorId)}，人设：${character.persona || '未提供'}。用户刚说：“${String(userText).slice(0, 350)}”。你尚未看过的帖子：${available.map(post => `${post.id} ${aiName(post.authorId, actorId, profilePersonaForPost(post))}，${post.kind === 'story' ? 'Story' : '动态'}，${readableTime(post.createdAt)}`).join('；')}。这里没有正文。${promptRule('chatViewDecision')}只返回 JSON：{"postId":"要查看的给定ID，不看则留空"}。`, charActor(character.id), controls?.context('chatPrep', [actorId]));
@@ -2516,6 +2600,26 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
             bind('moments-' + key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()), 'change', async event => { ensure().settings[key] = event.target.checked; await persist(); });
         }
         bind('moments-manage-btn', 'click', openManage);
+        bind('moments-memory-btn', 'click', openMemory);
+        bind('moments-memory-actor', 'change', event => { memoryState.actorId = event.target.value; memoryState.selected.clear(); renderMemory(); });
+        bind('moments-memory-search', 'input', event => { memoryState.query = event.target.value; memoryState.selected.clear(); renderMemory(); });
+        bind('moments-memory-select-all', 'click', () => {
+            const rows = filteredMemoryRows(), selected = rows.length && rows.every(row => memoryState.selected.has(row.postId));
+            for (const row of rows) if (selected) memoryState.selected.delete(row.postId); else memoryState.selected.add(row.postId);
+            renderMemory();
+        });
+        bind('moments-memory-delete-selected', 'click', () => forgetMemories([...memoryState.selected]));
+        bind('moments-memory-clear-all', 'click', () => forgetMemories(memoryRows().map(row => row.postId)));
+        el('moments-memory-list')?.addEventListener('click', event => {
+            const target = event.target.closest('[data-action]');
+            if (!target || memoryState.busy) return;
+            const postId = target.dataset.postId;
+            if (target.dataset.action === 'forget-memory') void forgetMemories([postId]);
+            else if (target.dataset.action === 'toggle-memory') {
+                if (memoryState.selected.has(postId)) memoryState.selected.delete(postId); else memoryState.selected.add(postId);
+                renderMemory();
+            }
+        });
         bind('moments-manage-search', 'input', event => { state.manageQuery = event.target.value; state.selectedPostIds.clear(); renderManage(); });
         bind('moments-manage-author', 'change', event => { state.manageAuthor = event.target.value; state.selectedPostIds.clear(); renderManage(); });
         bind('moments-manage-select-all', 'click', toggleAllManagedPosts);
@@ -2749,10 +2853,10 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         });
         renderFeed();
         if (controls) controls.init({
-            ensure, persist, character: findCharacter, characterSettings, person, post: findPost, visibleTo, detail: renderDetail,
+            ensure, persist, character: findCharacter, characterSettings, person, post: findPost, visibleTo, memoryAllowed, detail: renderDetail,
             actors: () => [...new Set([...(db.characters || []).map(c => charActor(c.id)), ...ensure().contacts.filter(c => c.kind === 'npc').map(c => c.actorId)])],
             replyCandidates: post => [...new Set([...(actorMayInteract(post.authorId) && post.authorId !== 'user' ? [post.authorId] : []), ...candidatesForPost(post)])].filter(a => (post.authorId === a || post.seenBy?.[a]) && visibleTo(post, a)),
-            eventCandidates: post => (post.audienceIds||[]).filter(a=>a!=='user'&&a!==post.authorId&&person(a)),
+            eventCandidates: post => (post.audienceIds||[]).filter(a=>a!=='user'&&a!==post.authorId&&person(a)&&memoryAllowed(post.id,a)),
             viewStatus,
             friend: (requestId, task) => { const request = ensure().friendRequests.find(r => r.id === requestId && r.status === 'pending'); return request ? resolveFriendRequest(request, task) : Promise.resolve(); },
             replies: (postId, commentId, task) => generateReplies(postId, commentId, task),
