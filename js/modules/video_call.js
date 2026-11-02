@@ -771,6 +771,7 @@ const VideoCallModule = {
         }
         this.state.callType = type;
         this.state.isCallActive = true;
+        document.dispatchEvent(new CustomEvent('ovo-call-audio', { detail: { active: true } }));
         this.state.hasEnteredCallScene = false;
         this.state.seconds = 0;
         this.state.currentCallContext = [];
@@ -1152,6 +1153,9 @@ const VideoCallModule = {
 
     // === NovelAI 视频通话生图（返回 imageUrl 或 null） ===
     generateVcNovelAiImage: async function(tags) {
+        const callCharacter = this.state.currentChat;
+        const parsed = window.OvoFaceLock?.parsePrompt(tags);
+        const imageContext = window.OvoFaceLock?.capture(callCharacter, 'self');
         const bgEl = document.getElementById('vc-nai-bg');
         const imgEl = document.getElementById('vc-nai-bg-img');
         const loadingEl = document.getElementById('vc-nai-bg-loading');
@@ -1163,7 +1167,8 @@ const VideoCallModule = {
 
         try {
             console.log('[VC-ImageGen] 生成视频通话画面, tags:', tags);
-            const result = await generateImageDispatch(tags);
+            const result = await generateImageDispatch(parsed?.prompt || tags, null, imageContext);
+            if (this.state.currentChat !== callCharacter || !this.state.isCallActive) return null;
             if (result && result.imageUrl) {
                 // 等待图片加载完成后再显示（返回 Promise）
                 await new Promise((resolve) => {
@@ -1187,6 +1192,7 @@ const VideoCallModule = {
             }
         } catch (err) {
             console.error('[VC-NovelAI] 生图失败:', err);
+            if (imageContext?.settings._faceLock) showToast(err.message || '锁脸生图失败');
         } finally {
             if (loadingEl) loadingEl.style.display = 'none';
         }
@@ -1195,6 +1201,9 @@ const VideoCallModule = {
 
     // === GPT 视频通话生图（返回 imageUrl 或 null） ===
     generateVcGptImage: async function(tags) {
+        const callCharacter = this.state.currentChat;
+        const parsed = window.OvoFaceLock?.parsePrompt(tags);
+        const imageContext = window.OvoFaceLock?.capture(callCharacter, 'self', 'gpt');
         const bgEl = document.getElementById('vc-nai-bg');
         const imgEl = document.getElementById('vc-nai-bg-img');
         const loadingEl = document.getElementById('vc-nai-bg-loading');
@@ -1206,7 +1215,8 @@ const VideoCallModule = {
 
         try {
             console.log('[VC-GPT-ImageGen] 生成视频通话画面, tags:', tags);
-            const result = await generateGptImage(tags);
+            const result = await generateGptImage(parsed?.prompt || tags, imageContext?.settings || {});
+            if (this.state.currentChat !== callCharacter || !this.state.isCallActive) return null;
             if (result && result.imageUrl) {
                 // 等待图片加载完成后再显示（返回 Promise）
                 await new Promise((resolve) => {
@@ -1230,6 +1240,7 @@ const VideoCallModule = {
             }
         } catch (err) {
             console.error('[VC-GPT-ImageGen] 生图失败:', err);
+            if (imageContext?.settings._faceLock) showToast(err.message || '锁脸生图失败');
         } finally {
             if (loadingEl) loadingEl.style.display = 'none';
         }
@@ -1554,6 +1565,7 @@ const VideoCallModule = {
         this.state.isGenerating = false;
         this.state.isAiSpeaking = false;
         this.state.isCallActive = false;
+        document.dispatchEvent(new CustomEvent('ovo-call-audio', { detail: { active: false } }));
         this.state.isMinimized = false;
         this.state.hasEnteredCallScene = false;
 
@@ -2008,32 +2020,15 @@ const VideoCallModule = {
     },
 
     // === 保存 NovelAI 生成的图片 ===
-    saveNaiImage: function() {
+    saveNaiImage: async function() {
         const imgEl = document.getElementById('vc-nai-bg-img');
         if (!imgEl || !imgEl.src || imgEl.src === '' || imgEl.src === window.location.href) {
             showToast('当前没有可保存的图片');
             return;
         }
 
-        try {
-            const link = document.createElement('a');
-            link.href = imgEl.src;
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-            link.download = `videocall_${timestamp}.png`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            showToast('图片已保存');
-        } catch (err) {
-            console.error('[VideoCall] 保存图片失败:', err);
-            // 如果是 blob/data URL，尝试 open 新窗口
-            try {
-                window.open(imgEl.src, '_blank');
-                showToast('已在新窗口打开图片，请长按保存');
-            } catch (e2) {
-                showToast('保存失败，请截图保存');
-            }
-        }
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        await OvoFileDownload.saveImage(imgEl.src, `videocall_${timestamp}.png`);
     },
 
     // === 收起/展开聊天文本内容 ===

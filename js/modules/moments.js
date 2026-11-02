@@ -21,11 +21,48 @@
         viewDecision: '结合人设自然决定是否回应；可以完全不行动，也可以给自己的动态点赞、评论、自言自语或回复别人。不要机械夸赞，不要声称没执行的操作。',
         friendDecision: '根据人设、关系及最近发生的事独立决定同意、拒绝或忽略；忽略可以长期保持。也可选择是否告诉原本认识的角色。'
     };
+    const promptDefinitions = [
+        ['post', '自主发动态', '发帖与记录', '角色允许在当前场景发动态'],
+        ['story', '自主发 Story', '发帖与记录', '角色允许在当前场景发 Story'],
+        ['postGeneration', '发帖内容生成', '发帖与记录', '实际生成动态或 Story 正文时'],
+        ['browse', '自主浏览', '浏览与互动', '角色已开启自主浏览'],
+        ['explicitView', '明确请求观看', '浏览与互动', '仅开启互动、未开启自主浏览时'],
+        ['interact', '点赞与评论', '浏览与互动', '角色已开启动态互动'],
+        ['seen', '已看动态上下文', '浏览与互动', '存在实际已看过或自己发布的动态'],
+        ['unseen', '未看帖子索引', '浏览与互动', '已开启浏览且存在未看帖子（不含正文）'],
+        ['contacts', '角色人脉', '人脉与自主活动', '已开启人脉且存在可用人脉'],
+        ['autonomy', '自主活动判断', '人脉与自主活动', '后台判断是否进行动态活动时'],
+        ['chatViewDecision', '私聊中查看判断', '人脉与自主活动', '私聊中判断是否打开未看帖子时'],
+        ['viewDecision', '观看后互动判断', '人脉与自主活动', '实际打开动态后决定如何互动时'],
+        ['friendDecision', '人脉好友判断', '人脉与自主活动', '人脉处理好友申请时']
+    ];
+    function createPromptItems(room = db.magicRoom || {}) {
+        return promptDefinitions.map(([key, name]) => ({
+            id: `moments.${key}`, key, name, enabled: true,
+            content: String(room.momentsPrompts?.[key] ?? promptDefaults[key])
+        }));
+    }
+    function normalizePromptItems(items) {
+        const used = new Set();
+        return (Array.isArray(items) ? items : []).filter(entry => entry && Object.hasOwn(promptDefaults, entry.key)).map((entry, index) => {
+            let itemId = String(entry.id || `moments.item.${index}`);
+            while (used.has(itemId)) itemId += `.${index}`;
+            used.add(itemId);
+            return { id: itemId, key: entry.key, name: String(entry.name || '未命名条目'), content: String(entry.content ?? ''), enabled: entry.enabled !== false };
+        });
+    }
+    function getPromptItems(room = db.magicRoom || {}) {
+        // An intentionally empty list means all editable rules have been removed.
+        return Array.isArray(room.momentsPromptItems) ? normalizePromptItems(room.momentsPromptItems) : createPromptItems(room);
+    }
+    function compilePromptRules(rules, items = getPromptItems()) {
+        return items.filter(entry => entry.enabled && Object.hasOwn(rules, entry.key)).map(entry => {
+            const variables = rules[entry.key];
+            return entry.content.replace(/\{\{([^{}]+)\}\}/g, (match, name) => Object.hasOwn(variables, name) ? String(variables[name]) : match).trim();
+        }).filter(Boolean).join('\n');
+    }
     function promptRule(key, variables = {}) {
-        const saved = db.magicRoom?.momentsPrompts;
-        let value = saved && Object.prototype.hasOwnProperty.call(saved, key) ? String(saved[key]) : promptDefaults[key];
-        for (const [name, text] of Object.entries(variables)) value = value.split(`{{${name}}}`).join(text);
-        return value.trim();
+        return compilePromptRules({ [key]: variables });
     }
     let persistQueue = Promise.resolve();
     const id = prefix => prefix + '_' + (globalThis.crypto?.randomUUID?.() || Date.now() + '_' + Math.random().toString(36).slice(2));
@@ -355,7 +392,7 @@
         if (!media.length) return '';
         const items = media.map((item, index) => {
             if (item.status === 'pending' || item.status === 'error' || item.status === 'working') {
-                return `<div class="moments-media-pending">${esc(item.type === 'image' ? '图片' : '语音')}${item.status === 'error' ? '生成失败' : item.status === 'working' ? '生成中…' : '待生成'}${post.authorId !== 'user' && item.status !== 'working' ? `<button type="button" data-action="generate-media" data-post-id="${esc(post.id)}" data-index="${index}">生成</button>` : ''}</div>`;
+                return `<div class="moments-media-pending">${esc(item.type === 'image' ? '图片' : '语音')}${item.status === 'error' ? '生成失败' + (item.faceLockError ? '：' + esc(item.faceLockError) : '') : item.status === 'working' ? '生成中…' : '待生成'}${post.authorId !== 'user' && item.status !== 'working' ? `<button type="button" data-action="generate-media" data-post-id="${esc(post.id)}" data-index="${index}">生成</button>` : ''}</div>`;
             }
             if (item.type === 'image' || item.type === 'sticker') return `<img class="${item.type === 'sticker' ? 'moments-post-sticker' : ''}" src="${esc(safeImage(item.data))}" alt="${esc(item.type === 'sticker' ? item.name || '表情包' : '动态图片')}" data-action="view-image" data-post-id="${esc(post.id)}" data-index="${index}">`;
             if (item.type === 'video') return `<video src="${esc(safeMedia(item.data, 'video'))}" controls preload="metadata" playsinline></video>`;
@@ -1444,6 +1481,7 @@
         const extraContext = contact?.batchExtras ? Object.entries(contact.batchExtras).filter(([key, value]) => !['voice', 'gap'].includes(key) && String(value || '').trim()).map(([key, value]) => `${key}：${String(value).slice(0, 500)}`).join('\n') : '';
         let prompt = `你是熟人动态模拟器。请只以“${aiName(actorId, actorId)}”的身份写一条${kind === 'story' ? '24小时限时 Story' : '日常动态'}。角色人设：${actor.persona || '未提供'}。你当前的个人签名：${actor.signature || '未设置'}。${contact ? `与${aiName(charActor(contact.ownerCharId), actorId)}的关系：${contact.relationship || '朋友'}。` : ''}${extraContext ? `\n此人自己的补充设定（未公开内容不得泄露）：\n${extraContext}\n` : ''}\n世界设定：${context.world || '无'}\n${context.history ? `该角色近期私聊（仅帮助理解心情，绝不能把聊天秘密、用户隐私或未公开内容转述给其他人）：\n${context.history}\n` : ''}你能看到的近期动态：\n${context.posts || '暂无'}\n你亲历的近期动态操作：\n${activityContext(actorId) || '暂无'}\n${promptRule('postGeneration')}若提及别人，只能提及已被允许查看本帖的人：${audience.map(id => `${id}=${id === 'user' ? socialUserName : aiName(id, actorId)}`).join('，')}。可选用的表情包：${stickerChoices(actorId) || '无'}。请返回严格 JSON 对象，不要 Markdown：{"text":"1到180字自然动态","imagePrompt":"适合配图时填写画面描述，否则留空","voiceText":"适合配语音时填写口语化短句，否则留空","stickerId":"适合配表情包时填写可用表情ID，否则留空","mentions":["被艾特者的ID"]}。`;
         prompt += bilingualContent.prompt(ownCharacter, 'moments', '动态正文及角色录制的语音文字');
+        if (ownCharacter?.imageFaceLock?.enabled) prompt += '\nJSON 额外包含 imageSubject：只有发布者本人单独出镜（自拍、单人人像）填 "self"；风景、食物、宠物、其他人物或多人合照填 "other"。imagePrompt 不包含这个内部标记。';
         let result;
         if (controls?.settings(actorId).publish.habit) prompt += '\n用户设置的发布习惯：' + controls.settings(actorId).publish.habit;
         try { result = await askAI(prompt, actorId, task); }
@@ -1458,7 +1496,7 @@
         if (sticker) media.push({ ...sticker, type: 'sticker', stickerId: sticker.id });
         const imagePrompt = String(result.imagePrompt || '').trim().slice(0, 600);
         const voiceText = String(result.voiceText || '').trim().slice(0, 250);
-        if (settings.imageMode === 'manual' || settings.imageMode === 'auto' || (settings.imageMode === 'ai' && imagePrompt)) media.push({ id: id('media'), type: 'image', status: 'pending', prompt: imagePrompt || text });
+        if (settings.imageMode === 'manual' || settings.imageMode === 'auto' || (settings.imageMode === 'ai' && imagePrompt)) media.push({ id: id('media'), type: 'image', status: 'pending', prompt: imagePrompt || text, imageSubject: result.imageSubject === 'self' ? 'self' : 'other' });
         if (settings.voiceMode === 'manual' || settings.voiceMode === 'auto' || (settings.voiceMode === 'ai' && voiceText)) media.push({ id: id('media'), type: 'audio', status: 'pending', prompt: voiceText || text });
         const mentions = (Array.isArray(result.mentions) ? result.mentions : []).filter(id => audience.includes(id));
         const post = { id: id('moment'), kind, authorId: actorId, text, media, audienceIds: audience, userRecipientPersonaId: knownPersonaId(actorId), viewerPersonaIds: Object.fromEntries(audience.filter(id => id !== 'user').map(id => [id, knownPersonaId(id)])), reminderIds: [], mentions, mentionLabels: Object.fromEntries(mentions.map(id => [id, mentionLabel(text, id, actorId)])), likes: [], comments: [], createdAt: Date.now() };
@@ -1483,15 +1521,18 @@
         const item = post?.media?.[index];
         if (!item || item.status === 'working' || item.status === 'done') return;
         item.status = 'working';
+        delete item.faceLockError;
         renderFeed();
+        const imageContext = item.type === 'image' ? window.OvoFaceLock?.capture(findCharacter(post.authorId), item.imageSubject) : null;
         try {
             if (controls && task) await controls.request(post.authorId, task);
             if (item.type === 'image') {
-                const result = await generateImageDispatch(item.prompt || post.text);
+                const result = await generateImageDispatch(item.prompt || post.text, null, imageContext);
                 if (!result?.imageUrl) throw new Error('生图接口没有返回图片');
                 const blob = await fetch(result.imageUrl).then(response => response.blob());
                 item.data = typeof compressImage === 'function' ? await compressImage(blob, { quality: 0.83, maxWidth: 1440, maxHeight: 1440 }) : await fileToDataUrl(blob);
                 item.mime = blob.type || 'image/png';
+                item.faceLock = result.faceLock || null;
             } else if (item.type === 'audio') {
                 const charId = findCharacter(post.authorId)?.id || ensure().contacts.find(c => c.actorId === post.authorId)?.ownerCharId;
                 const voice = typeof VoiceSelector !== 'undefined' ? VoiceSelector.getVoiceConfig(charId) : null;
@@ -1507,9 +1548,10 @@
             if (feedback) toast('媒体生成成功');
         } catch (error) {
             item.status = 'error';
+            if (imageContext?.settings._faceLock) item.faceLockError = error.message || '锁脸生图失败';
             await persist();
             console.error('动态媒体生成失败', error);
-            if (feedback) toast(error.message || '媒体生成失败');
+            if (feedback || imageContext?.settings._faceLock) toast(error.message || '媒体生成失败');
         }
         renderFeed();
         if (el('moments-detail-screen').classList.contains('active') && state.currentPostId === postId) renderDetail(postId);
@@ -2328,7 +2370,7 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         }
         await controls.tick();
     }
-    function promptForCharacter(charId, isBackground = false) {
+    function promptForCharacter(charId, isBackground = false, promptItems) {
         const actorId = charActor(charId);
         const m = ensure();
         const character = findCharacter(actorId);
@@ -2354,31 +2396,34 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
             return `- [ID:${post.id}] ${reminder ? `[${reminder.text}] ` : ''}${aiName(post.authorId, actorId, profilePersonaForPost(post))}：${postContextText(post, 180)}${comments ? `；评论：${comments}` : ''}`;
         });
         const capabilities = profileContext ? [profileContext] : [];
+        const rules = {};
+        const addRule = (key, variables = {}) => { rules[key] = variables; };
         if (controls) {
             const c = controls.settings(actorId);
             c.actions.post = settings.postEnabled; c.actions.story = settings.storyEnabled;
             capabilities.push(controls.discussionPrompt(actorId));
             capabilities.push(`用户设置的动态规则：当前允许动作：${Object.keys(c.actions).filter(k => c.actions[k]).join('、') || '无'}。${c.requests.postContent ? '' : '禁止额外生成动态正文，不要输出发帖指令。'}${c.publish.habit ? '发布习惯：' + c.publish.habit : ''}是否行动由你判断，可以完全不行动，不要求凑发布数量。不要对同一评论重复接话；重复参与仅在用户允许时执行。`);
         }
-        if (settings.postEnabled) capabilities.push(promptRule('post'));
+        if (settings.postEnabled) addRule('post');
         if (posts.some(post => post.authorId === actorId)) capabilities.push('你可自主删除自己发布的动态：[MOMENT:delete:动态ID]。只能删除自己的帖子，完成后你会记得此事。');
-        if (settings.storyEnabled) capabilities.push(promptRule('story'));
+        if (settings.storyEnabled) addRule('story');
         if (nicknameSetting(actorId, 'selfRename')) capabilities.push('你可以自然地决定修改自己的动态网名，指令：[MOMENT:rename:新网名]。只能修改自己的网名，不能频繁改名；执行成功后新网名会成为当前主页名字。');
-        if (settings.browseEnabled) capabilities.push(promptRule('browse'));
-        else if (settings.interactEnabled) capabilities.push(promptRule('explicitView'));
-        if (settings.interactEnabled) { if(controls){const a=controls.settings(actorId).actions;capabilities.push(`你当前动态权限：点赞${a.like?'允许':'禁止'}；发表评论${a.comment?'允许':'禁止'}；回复评论${a.reply?'允许':'禁止'}。禁止的动作不要输出指令。`);} capabilities.push(promptRule('interact')); const stickers = stickerChoices(actorId); if (stickers) capabilities.push('你可在动态评论和回复中使用的表情包：' + stickers + '。指令：[MOMENT:sticker:动态ID:表情ID]、[MOMENT:reply-sticker:动态ID:评论ID:表情ID]。'); }
+        if (settings.browseEnabled) addRule('browse');
+        else if (settings.interactEnabled) addRule('explicitView');
+        if (settings.interactEnabled) { if(controls){const a=controls.settings(actorId).actions;capabilities.push(`你当前动态权限：点赞${a.like?'允许':'禁止'}；发表评论${a.comment?'允许':'禁止'}；回复评论${a.reply?'允许':'禁止'}。禁止的动作不要输出指令。`);} addRule('interact'); const stickers = stickerChoices(actorId); if (stickers) capabilities.push('你可在动态评论和回复中使用的表情包：' + stickers + '。指令：[MOMENT:sticker:动态ID:表情ID]、[MOMENT:reply-sticker:动态ID:评论ID:表情ID]。'); }
         if (settings.contactsEnabled) {
             const contacts = activeContactsFor(character.id).map(c => `${aiName(c.actorId, actorId)}（${c.relationship || '熟人'}）`);
-            if (contacts.length) capabilities.push(promptRule('contacts', { 人脉列表: contacts.join('、') }));
+            if (contacts.length) addRule('contacts', { 人脉列表: contacts.join('、') });
             const told = m.friendRequests.filter(r => r.tellOwner && r.ownerMessage && m.contacts.some(c => c.actorId === r.actorId && c.ownerCharId === character.id)).slice(-3);
             if (told.length) capabilities.push('人脉主动告诉你的消息：' + told.map(r => r.ownerMessage).join('；'));
         }
-        if (posts.length) capabilities.push(promptRule('seen', { 动态列表: lines.join('\n') }));
+        if (posts.length) addRule('seen', { 动态列表: lines.join('\n') });
         if (activity) capabilities.push('你亲历的动态操作记录（删除的动态已不可查看，但你记得自己的经历）：\n' + activity);
         if (settings.browseEnabled) {
             const unseen = m.posts.filter(post => memoryAllowed(post.id, actorId) && visibleTo(post, actorId) && post.authorId !== actorId && !post.seenBy?.[actorId] && (post.kind !== 'story' || post.expiresAt > Date.now())).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
-            if (unseen.length) capabilities.push(promptRule('unseen', { 动态列表: unseen.map(post => `[ID:${post.id}] ${aiName(post.authorId, actorId, profilePersonaForPost(post))}，${post.kind === 'story' ? 'Story' : '动态'}，${readableTime(post.createdAt)}`).join('；') }));
+            if (unseen.length) addRule('unseen', { 动态列表: unseen.map(post => `[ID:${post.id}] ${aiName(post.authorId, actorId, profilePersonaForPost(post))}，${post.kind === 'story' ? 'Story' : '动态'}，${readableTime(post.createdAt)}`).join('；') });
         }
+        capabilities.push(compilePromptRules(rules, promptItems));
         const activeCapabilities = capabilities.filter(Boolean);
         return activeCapabilities.length ? '\n<visible_moments>\n' + activeCapabilities.join('\n') + '\n</visible_moments>\n' : '';
     }
@@ -2866,5 +2911,5 @@ ${batch.options.worldReference ? '可参考以下世界书，不得违背：\n' 
         });
     }
     function open() { if (!state.initialized) init(); renderFeed(); switchScreen('moments-screen'); }
-    window.Moments = { init, open, loadCharacterSettings, saveCharacterSettings, isChatLinked, promptForCharacter, prepareForChat, consumeAiCommands, generatePost, chatEvent, promptDefaults, visibleTo, canSeeInteraction };
+    window.Moments = { init, open, loadCharacterSettings, saveCharacterSettings, isChatLinked, promptForCharacter, prepareForChat, consumeAiCommands, generatePost, chatEvent, promptDefaults, promptDefinitions, createPromptItems, normalizePromptItems, getPromptItems, compilePromptRules, visibleTo, canSeeInteraction };
 })();

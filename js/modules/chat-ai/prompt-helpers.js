@@ -242,6 +242,9 @@ function getOnlineOutputFormats(character, worldBooksBefore, worldBooksAfter) {
         }
     }
  
+    if (_imgEnabled && character.imageFaceLock?.enabled && window.OvoFaceLock) {
+        photoVideoFormat += '\n' + window.OvoFaceLock.subjectInstruction();
+    }
     let outputFormats = `
 a) 普通消息: [${character.realName}的消息：{消息内容}]
 b) 双语模式下的普通消息（非双语模式请忽略此条）: [${character.realName}的消息：{外语原文}「中文翻译」]
@@ -295,6 +298,9 @@ t) 赠送亲属卡: [${character.realName}赠送亲属卡：额度{金额}元；
    const allWorldBookContent = (worldBooksBefore || '') + '\n' + (worldBooksAfter || '');
    if (allWorldBookContent.includes('<orange>')) {
        outputFormats += `\n     m) HTML模块: {HTML内容}。这是一种特殊的、用于展示丰富样式的小卡片消息，格式必须为纯HTML+行内CSS，你可以用它来创造更有趣的互动。`;
+   }
+   if (window.InteractiveMessages && (allWorldBookContent.includes('<uwuxjc') || /HTML|互动网页|互动页面|小游戏|滑动图集/i.test(character.history?.at(-1)?.content || ''))) {
+       outputFormats += window.InteractiveMessages.promptGuide();
    }
    
    return outputFormats;

@@ -329,15 +329,12 @@
         };
     }
 
-    function downloadJson(data, filename) {
-        const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
-        const anchor = document.createElement('a');
-        anchor.href = url; anchor.download = filename; document.body.appendChild(anchor); anchor.click(); anchor.remove();
-        URL.revokeObjectURL(url);
+    async function downloadJson(data, filename) {
+        return OvoFileDownload.save(new Blob([JSON.stringify(data)], { type: 'application/json' }), filename);
     }
 
     async function resolveForGeneration(model, generationSettings = {}, signal) {
-        const settings = state();
+        const settings = generationSettings._referenceSnapshot?.vibe || state();
         if (!settings.enabled || !settings.activeGroupId) return { images: [], information: [], strengths: [], groupName: '' };
         if (!supportsVibe(model)) throw new Error('当前 NovelAI 模型不支持 VIBE。V5 暂不支持，请切换到 V4/V4.5 或 V3，或关闭 VIBE。');
         const current = await group(settings.activeGroupId);
@@ -367,10 +364,11 @@
     }
 
     async function resolvePreciseReferences(model, generationSettings = {}, signal) {
-        const settings = preciseState();
+        const settings = generationSettings._referenceSnapshot?.precise || preciseState();
         const items = (settings.items || []).filter(item => item.enabled !== false);
         if (!settings.enabled || !items.length) return { images: [], strengths: [], fidelity: [], descriptions: [] };
-        if (state().enabled && state().activeGroupId) throw new Error('Precise Reference 与 VIBE 不能同时启用，请关闭其中一项。');
+        const vibeSettings = generationSettings._referenceSnapshot?.vibe || state();
+        if (vibeSettings.enabled && vibeSettings.activeGroupId) throw new Error('Precise Reference 与 VIBE 不能同时启用，请关闭其中一项。');
         if (!/nai-diffusion-4-5-(?:full|curated)/.test(String(model || ''))) throw new Error('Precise Reference 仅支持 NovelAI V4.5 Full / Curated。');
         const result = { images: [], strengths: [], fidelity: [], descriptions: [] };
         for (const item of items) {
@@ -555,7 +553,7 @@
                 controls.append(title, encodingState, sliders);
                 const actions = document.createElement('div'); actions.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
                 const exportOne = document.createElement('button'); exportOne.type = 'button'; exportOne.className = 'btn btn-small'; exportOne.textContent = '导出'; exportOne.style.cssText = 'padding:4px 6px;font-size:10px;';
-                exportOne.addEventListener('click', async () => { try { downloadJson(await exportRecord(item), `${item.name || 'VIBE'}.naiv4vibe`); } catch (error) { showToast(`导出失败：${error.message}`); } });
+                exportOne.addEventListener('click', async () => { try { await downloadJson(await exportRecord(item), `${item.name || 'VIBE'}.naiv4vibe`); } catch (error) { showToast(`导出失败：${error.message}`); } });
                 const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-small'; remove.textContent = '移除'; remove.style.cssText = 'padding:4px 6px;font-size:10px;';
                 remove.addEventListener('click', async () => { draftItems.splice(index, 1); await renderItems(); });
                 actions.append(exportOne, remove); row.append(thumb, controls, actions); list.appendChild(row);
@@ -637,16 +635,14 @@
             if (!draftItems.length) return showToast('当前组没有可导出的 VIBE');
             try {
                 const vibes = []; for (const item of draftItems) vibes.push(await exportRecord(item));
-                downloadJson({ identifier: BUNDLE_IDENTIFIER, version: 1, vibes }, `${name.value.trim() || 'OVO_VIBE组'}.naiv4vibeBundle`);
-                showToast(`已导出 ${vibes.length} 个 VIBE`);
+                await downloadJson({ identifier: BUNDLE_IDENTIFIER, version: 1, vibes }, `${name.value.trim() || 'OVO_VIBE组'}.naiv4vibeBundle`);
             } catch (error) { showToast(`导出失败：${error.message}`); }
         });
         document.getElementById('novelai-vibe-export-encodings')?.addEventListener('click', async () => {
             if (!draftItems.length) return showToast('当前组没有可导出的 VIBE');
             try {
                 const vibes = []; for (const item of draftItems) vibes.push(await exportRecord(item, { encodingsOnly: true, model: currentModel() }));
-                downloadJson({ identifier: BUNDLE_IDENTIFIER, version: 1, vibes }, `${name.value.trim() || 'OVO_VIBE组'}_仅编码.naiv4vibeBundle`);
-                showToast('已导出仅编码 VIBE 组（不含原图）');
+                await downloadJson({ identifier: BUNDLE_IDENTIFIER, version: 1, vibes }, `${name.value.trim() || 'OVO_VIBE组'}_仅编码.naiv4vibeBundle`);
             } catch (error) { showToast(`导出失败：${error.message}`); }
         });
         await setupPreciseUI();

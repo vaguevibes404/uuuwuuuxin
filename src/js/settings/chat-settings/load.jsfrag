@@ -18,6 +18,7 @@ function loadSettingsToSidebar() {
         if (enableDynamicAgeEl) enableDynamicAgeEl.checked = e.enableDynamicAge || false;
         
         document.getElementById('setting-char-remark').value = e.remarkName;
+        window.CharacterProfile?.loadSettings(e);
         
         const timezoneEl = document.getElementById('setting-char-timezone');
         const timezonePresetEl = document.getElementById('setting-char-timezone-preset');
@@ -857,6 +858,7 @@ function loadSettingsToSidebar() {
         if (gptArtistEl) {
             gptArtistEl.value = e.gptArtistPrompt || '';
         }
+        window.OvoFaceLock?.loadSettings(e);
 
         const ar = e.autoReply || {};
         document.getElementById('setting-auto-reply-enabled').checked = ar.enabled || false;
